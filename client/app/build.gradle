@@ -8,8 +8,8 @@ android {
         applicationId "com.wexow.rat"
         minSdkVersion 21
         targetSdkVersion 34
-        versionCode 1
-        versionName "1.0"
+        versionCode project.hasProperty('versionCode') ? project.versionCode.toInteger() : 1
+        versionName project.hasProperty('versionName') ? project.versionName : "1.0"
     }
 
     compileOptions {
@@ -17,10 +17,33 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    // Signing config reads from env vars injected by CI, falls back to
+    // a local keystore.jks if present (for local release builds).
+    signingConfigs {
+        release {
+            def ksPath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/keystore.jks"
+            def ksFile = file(ksPath)
+            if (ksFile.exists()) {
+                storeFile     ksFile
+                storePassword System.getenv("KEYSTORE_PASSWORD") ?: ""
+                keyAlias      System.getenv("KEY_ALIAS")         ?: ""
+                keyPassword   System.getenv("KEY_PASSWORD")      ?: ""
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            debuggable true
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            def ksPath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/keystore.jks"
+            if (file(ksPath).exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
