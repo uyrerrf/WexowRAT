@@ -14,9 +14,6 @@ export default defineConfig({
   server: {
     port: 3000,
     host: "0.0.0.0",
-    // Allow the sandbox preview gateway (and any external host) to reach the
-    // dev server. Without this, Vite blocks the preview with
-    // "This host is not allowed".
     allowedHosts: true,
     proxy: {
       "/api": {
@@ -36,10 +33,10 @@ export default defineConfig({
         target: "http://localhost:3000",
         changeOrigin: true,
       },
-      build: {
-        outDir: "../server/public/app",
-        emptyOutDir: true,
-      },
     },
+  },
+  build: {
+    outDir: "../server/public/app",
+    emptyOutDir: true,
   },
 });
