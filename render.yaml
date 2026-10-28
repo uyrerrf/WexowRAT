@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: wexowrat
+    env: docker
+    plan: free
+    envVars:
+      - key: ACCESS_PASSWORD
+        value: your_strong_password_here
+      - key: SESSION_SECRET
+        generateValue: true
+    disk:
+      name: wexow-data
+      mountPath: /app
+      sizeGB: 1
