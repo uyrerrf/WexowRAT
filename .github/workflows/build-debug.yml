@@ -28,18 +28,15 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          log-accepted-android-sdk-licenses: false
+      - name: Accept Android SDK licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
 
       - name: Install required SDK components
         run: |
-          sdkmanager "build-tools;30.0.3" "platforms;android-34" --sdk_root=$ANDROID_HOME
-
-      - name: Create local.properties
-        working-directory: client
-        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "build-tools;30.0.3" \
+            "platforms;android-34"
 
       - name: Cache Gradle wrapper
         uses: actions/cache@v4
@@ -51,9 +48,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.gradle/caches
-          key: gradle-caches-${{ hashFiles('client/**/*.gradle') }}-${{ hashFiles('client/**/*.gradle.kts') }}
+          key: gradle-caches-${{ hashFiles('client/**/*.gradle') }}
           restore-keys: |
             gradle-caches-
+
+      - name: Create local.properties
+        working-directory: client
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Make gradlew executable
         working-directory: client
@@ -62,33 +63,29 @@ jobs:
       - name: Build debug APK
         working-directory: client
         run: ./gradlew assembleDebug --stacktrace --no-daemon
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME }}
 
-      - name: Verify APK exists
+      - name: Verify APK
+        id: apk
         working-directory: client
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           if [ ! -f "$APK" ]; then
-            echo "APK not found at expected path"
-            find . -name "*.apk" 2>/dev/null
-            exit 1
+            echo "APK not found" && find . -name "*.apk" && exit 1
           fi
-          echo "APK_PATH=$(realpath $APK)" >> $GITHUB_ENV
-          echo "APK_SIZE=$(du -h $APK | awk '{print $1}')" >> $GITHUB_ENV
-          echo "APK found: $APK ($(du -h $APK | awk '{print $1}'))"
+          echo "path=$APK"                              >> $GITHUB_OUTPUT
+          echo "size=$(du -h $APK | awk '{print $1}')" >> $GITHUB_OUTPUT
 
-      - name: Upload debug APK artifact
+      - name: Copy to server directory
+        run: cp client/app/build/outputs/apk/debug/app-debug.apk server/base.apk
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: wexow-debug-${{ github.sha }}
           path: client/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: Upload APK to server directory
-        run: cp client/app/build/outputs/apk/debug/app-debug.apk server/base.apk
-
-      - name: Upload server base.apk artifact
+      - name: Upload server base.apk
         uses: actions/upload-artifact@v4
         with:
           name: server-base-apk-${{ github.sha }}
@@ -97,12 +94,10 @@ jobs:
 
       - name: Build summary
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Debug Build" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| APK Size | $APK_SIZE |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build Type | debug |" >> $GITHUB_STEP_SUMMARY
+          echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> $GITHUB_STEP_SUMMARY
           
