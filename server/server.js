@@ -2091,7 +2091,8 @@ app.get("*", (req, res, next) => {
 // =====================================================
 // ============ Run ==================================
 // =====================================================
-server.listen(3000, () => {
-  console.log("Web Dashboard running on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Web Dashboard running on http://0.0.0.0:${PORT}`);
   console.log(`Access password: ${ACCESS_PASSWORD}`);
 });
